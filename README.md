@@ -4,6 +4,8 @@
 
 Drip turns AI judgment into autonomous payment flows. When a contributor stops delivering, an AI agent reaches consensus that they've gone dormant — and the stream pauses itself. No DAO multisig, no governance vote, no human in the loop. Just a deterministic AI decision moving real money on Somnia.
 
+sharp proof:
+> AI consensus can autonomously govern money flows.
 ---
 
 ## Why this exists
@@ -30,12 +32,16 @@ No other EVM-compatible chain runs deterministic LLM inference inside validator 
 
 Combined with on-chain Reactivity (subscriptions that schedule themselves into future blocks without an external keeper) and 100ms block times, Drip operates as a fully self-perpetuating autonomous system. The contract is the only actor.
 
+### Verified, not assumed
+
+Drip's classifier was empirically verified on Somnia testnet on May 21, 2026 — three validators independently classified the same input and reached deterministic consensus (request [`919585`](https://agents.testnet.somnia.network/receipts/919585), 276 prompt tokens, 1 LLM request per validator, all three returned `"active"`). A full 26-invocation cross-validator determinism suite across six classification cases (including the borderline `commitCount=2, prCount=0` boundary that's hardest to get right) passed with 3/3 unanimity on every single invocation — same verdict, same token counts. The complete run, with per-invocation request IDs and receipt URLs for independent audit, lives in [`contracts/test-results/`](contracts/test-results/).
+
 ## Architecture
 
 - **`Drip.sol`** — the streaming primitive. Sablier-style per-second rate math. Tracks streams, accrued balances, statuses (Active / Paused / Cancelled / Completed). Inherits from `SomniaEventHandler` so the reactivity precompile can call it back when scheduled checks fire.
 - **`DripPolicies.sol`** — the agent-control layer. Holds per-stream policy configuration (GitHub repo, check interval, threshold criteria). Coordinates the JSON API → LLM Inference → action loop.
 - **Reactivity** — each active stream maintains a one-shot Schedule subscription. When the subscription fires, the next one schedules itself. Self-perpetuating chain per stream.
-- **Agents** — JSON API Request fetches the GitHub activity payload, LLM Inference classifies it using a `Role / Task / Data / Output` prompt structure with `allowedValues = ["active", "dormant", "inconclusive"]` for deterministic three-way consensus.
+- **Agents** — JSON API Request fetches the GitHub activity payload, LLM Inference classifies it using a system + prompt split (system carries identity and output discipline; prompt carries the task, thresholds, and JSON data) with `chainOfThought = false` and `allowedValues = ["active", "dormant", "inconclusive"]` for deterministic three-way consensus.
 
 ## What's possible next
 
