@@ -49,6 +49,15 @@ contract Drip is SomniaEventHandler {
     }
 
     // ─────────────────────────────────────────────────────────────────────
+    //  Constants
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice Minimum native-token balance Drip keeps untouched for future
+    ///         reactivity-subscription creation (Somnia requires 32 native
+    ///         tokens at every `subscribe` call). Used by the solvency view.
+    uint256 public constant REACTIVITY_RESERVE = 32 ether;
+
+    // ─────────────────────────────────────────────────────────────────────
     //  Storage
     // ─────────────────────────────────────────────────────────────────────
 
@@ -62,6 +71,12 @@ contract Drip is SomniaEventHandler {
 
     /// @notice The underlying stream records, keyed by stream ID.
     mapping(uint256 streamId => Stream) public streams;
+
+    /// @notice Running total of native-token obligations across non-terminal
+    ///         streams. Updated on createStream / withdraw / cancel / pause-time
+    ///         is not needed since pause does not change the total commitment.
+    ///         This avoids O(n) iteration in isSolvent / treasuryHealth.
+    uint256 public totalCommittedUnreleased;
 
     // ─────────────────────────────────────────────────────────────────────
     //  Events
@@ -94,9 +109,11 @@ contract Drip is SomniaEventHandler {
     error InvalidStatus(StreamStatus current, StreamStatus required);
     error InvalidDuration();
     error InvalidRecipient();
+    error InvalidAmount();
     error InsufficientValue(uint256 provided, uint256 required);
     error InsufficientBalance();
     error NothingToWithdraw();
+    error TransferFailed();
 
     // ─────────────────────────────────────────────────────────────────────
     //  Modifiers
@@ -104,6 +121,11 @@ contract Drip is SomniaEventHandler {
 
     modifier onlyPolicies() {
         if (msg.sender != policies) revert NotPolicies();
+        _;
+    }
+
+    modifier streamExists(uint256 streamId) {
+        if (streams[streamId].status == StreamStatus.None) revert InvalidStream();
         _;
     }
 
@@ -129,7 +151,7 @@ contract Drip is SomniaEventHandler {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Stream lifecycle — TODO: implement
+    //  Stream lifecycle
     // ─────────────────────────────────────────────────────────────────────
 
     /// @notice Creates a new payment stream.
@@ -137,71 +159,182 @@ contract Drip is SomniaEventHandler {
     /// @param durationSeconds How long the stream should run.
     /// @return streamId The ID of the newly created stream.
     /// @dev    msg.value is the total amount to stream over the duration.
-    ///         Reverts if recipient is zero, duration is zero, or msg.value is zero.
+    ///         The stream begins immediately at block.timestamp.
+    ///         ratePerSecond is computed by integer division; any rounding
+    ///         dust (msg.value - ratePerSecond * durationSeconds) sits in
+    ///         the contract and is unrecoverable by the recipient. The dust
+    ///         is included in the contract's solvency math (it's part of
+    ///         this stream's obligation and only this stream's recipient
+    ///         could ever receive it, but they can't because rate * duration
+    ///         caps below msg.value). Acceptable trade-off for the hackathon.
     function createStream(
         address recipient,
         uint256 durationSeconds
     ) external payable returns (uint256 streamId) {
-        // TODO: validate inputs (recipient != 0, durationSeconds > 0, msg.value > 0)
-        // TODO: compute ratePerSecond = msg.value / durationSeconds
-        // TODO: write the Stream struct
-        // TODO: emit StreamCreated
-        // TODO: return the new stream ID
-        revert("TODO: implement createStream");
+        if (recipient == address(0)) revert InvalidRecipient();
+        if (durationSeconds == 0) revert InvalidDuration();
+        if (msg.value == 0) revert InvalidAmount();
+
+        uint256 ratePerSecond = msg.value / durationSeconds;
+        if (ratePerSecond == 0) revert InvalidAmount(); // msg.value < durationSeconds
+
+        streamId = nextStreamId++;
+        uint256 startTime = block.timestamp;
+        uint256 endTime = startTime + durationSeconds;
+
+        streams[streamId] = Stream({
+            sender: msg.sender,
+            recipient: recipient,
+            totalAmount: msg.value,
+            ratePerSecond: ratePerSecond,
+            startTime: startTime,
+            endTime: endTime,
+            withdrawn: 0,
+            pausedAt: 0,
+            pausedAccumulated: 0,
+            status: StreamStatus.Active
+        });
+
+        // Track the maximum the recipient can ever withdraw (rate * duration,
+        // which is ≤ msg.value due to integer division dust).
+        totalCommittedUnreleased += ratePerSecond * durationSeconds;
+
+        emit StreamCreated(
+            streamId,
+            msg.sender,
+            recipient,
+            msg.value,
+            ratePerSecond,
+            startTime,
+            endTime
+        );
     }
 
     /// @notice Withdraws available balance to the recipient.
     /// @param streamId The stream to withdraw from.
-    /// @param amount The amount to withdraw. Pass type(uint256).max to withdraw all available.
-    function withdraw(uint256 streamId, uint256 amount) external {
-        // TODO: revert if not recipient
-        // TODO: compute available balance using _availableBalance
-        // TODO: cap amount at available
-        // TODO: transfer to recipient
-        // TODO: update withdrawn
-        // TODO: emit Withdrawal
-        // TODO: if stream is past endTime and all withdrawn, mark Completed
-        revert("TODO: implement withdraw");
+    /// @param amount The amount to withdraw, or type(uint256).max for all.
+    function withdraw(uint256 streamId, uint256 amount)
+        external
+        streamExists(streamId)
+    {
+        Stream storage s = streams[streamId];
+        if (msg.sender != s.recipient) revert NotRecipient();
+
+        uint256 available = _availableBalance(streamId);
+        if (available == 0) revert NothingToWithdraw();
+
+        uint256 toSend = (amount == type(uint256).max || amount > available)
+            ? available
+            : amount;
+        if (toSend == 0) revert InvalidAmount();
+
+        s.withdrawn += toSend;
+        totalCommittedUnreleased -= toSend;
+
+        // Lazy completion: if status is Active and the stream has fully
+        // accrued and been fully withdrawn, mark Completed. We don't auto-
+        // complete a Paused stream — sender or policies still need to act.
+        uint256 maxAccruable = s.ratePerSecond * (s.endTime - s.startTime);
+        if (
+            s.status == StreamStatus.Active &&
+            block.timestamp >= s.endTime &&
+            s.withdrawn >= maxAccruable
+        ) {
+            s.status = StreamStatus.Completed;
+            emit StreamCompleted(streamId);
+        }
+
+        (bool ok, ) = s.recipient.call{value: toSend}("");
+        if (!ok) revert TransferFailed();
+
+        emit Withdrawal(streamId, s.recipient, toSend);
     }
 
     /// @notice Pauses a stream. Only callable by the DripPolicies contract.
     /// @param streamId The stream to pause.
     /// @param reason A short human-readable reason (for event log / UI).
-    function pause(uint256 streamId, string calldata reason) external onlyPolicies {
-        // TODO: revert if status != Active
-        // TODO: record pausedAt = block.timestamp
-        // TODO: set status to Paused
-        // TODO: emit StreamPaused
-        revert("TODO: implement pause");
+    function pause(uint256 streamId, string calldata reason)
+        external
+        onlyPolicies
+        streamExists(streamId)
+    {
+        Stream storage s = streams[streamId];
+        if (s.status != StreamStatus.Active) {
+            revert InvalidStatus(s.status, StreamStatus.Active);
+        }
+        s.pausedAt = block.timestamp;
+        s.status = StreamStatus.Paused;
+        emit StreamPaused(streamId, reason);
     }
 
     /// @notice Resumes a paused stream. Only callable by the DripPolicies contract.
     /// @param streamId The stream to resume.
-    function resume(uint256 streamId) external onlyPolicies {
-        // TODO: revert if status != Paused
-        // TODO: pausedAccumulated += (block.timestamp - pausedAt)
-        // TODO: clear pausedAt
-        // TODO: set status to Active
-        // TODO: emit StreamResumed
-        revert("TODO: implement resume");
+    /// @dev    Naive accumulation (does not cap at endTime). The
+    ///         _availableBalance view caps pausedSpan at totalSpan so that
+    ///         pauses extending past endTime do not under-flow the math.
+    function resume(uint256 streamId)
+        external
+        onlyPolicies
+        streamExists(streamId)
+    {
+        Stream storage s = streams[streamId];
+        if (s.status != StreamStatus.Paused) {
+            revert InvalidStatus(s.status, StreamStatus.Paused);
+        }
+        s.pausedAccumulated += block.timestamp - s.pausedAt;
+        s.pausedAt = 0;
+        s.status = StreamStatus.Active;
+        emit StreamResumed(streamId);
     }
 
     /// @notice Cancels a stream. Only callable by the original sender.
-    /// @dev    Refunds the unstreamed portion to the sender.
+    /// @dev    Pays the recipient whatever has accrued so far, refunds the
+    ///         remainder of the stream's commitment to the sender, and
+    ///         transitions to Cancelled. Both transfers can run because
+    ///         the contract is solvent by construction.
     /// @param streamId The stream to cancel.
-    function cancel(uint256 streamId) external {
-        // TODO: revert if not sender
-        // TODO: revert if status is not Active or Paused
-        // TODO: compute available balance for recipient
-        // TODO: pay recipient the available balance
-        // TODO: refund remainder to sender
-        // TODO: set status to Cancelled
-        // TODO: emit StreamCancelled
-        revert("TODO: implement cancel");
+    function cancel(uint256 streamId) external streamExists(streamId) {
+        Stream storage s = streams[streamId];
+        if (msg.sender != s.sender) revert NotSender();
+        if (
+            s.status != StreamStatus.Active &&
+            s.status != StreamStatus.Paused
+        ) {
+            revert InvalidStatus(s.status, StreamStatus.Active);
+        }
+
+        uint256 recipientShare = _availableBalance(streamId);
+
+        // Outstanding obligation from this stream that we are releasing back
+        // to the sender. = (max accruable - already-withdrawn - recipientShare).
+        uint256 maxAccruable = s.ratePerSecond * (s.endTime - s.startTime);
+        uint256 commitmentReleased = maxAccruable - s.withdrawn - recipientShare;
+
+        // Also refund the integer-division dust to the sender — they're the
+        // only party with a claim on it, since the recipient can never reach it.
+        uint256 dust = s.totalAmount - maxAccruable;
+        uint256 senderRefund = commitmentReleased + dust;
+
+        // Update accounting BEFORE external calls (CEI pattern).
+        s.withdrawn += recipientShare;
+        s.status = StreamStatus.Cancelled;
+        totalCommittedUnreleased -= (recipientShare + commitmentReleased);
+
+        if (recipientShare > 0) {
+            (bool okR, ) = s.recipient.call{value: recipientShare}("");
+            if (!okR) revert TransferFailed();
+            emit Withdrawal(streamId, s.recipient, recipientShare);
+        }
+        if (senderRefund > 0) {
+            (bool okS, ) = s.sender.call{value: senderRefund}("");
+            if (!okS) revert TransferFailed();
+        }
+
+        emit StreamCancelled(streamId);
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Views — TODO: implement
+    //  Views
     // ─────────────────────────────────────────────────────────────────────
 
     /// @notice Returns the amount the recipient can currently withdraw.
@@ -209,23 +342,74 @@ contract Drip is SomniaEventHandler {
         return _availableBalance(streamId);
     }
 
-    /// @notice Returns true if the contract is solvent across all active streams.
-    function isSolvent() external view returns (bool) {
-        // TODO: sum up all unclaimed balances across active streams
-        // TODO: compare to address(this).balance - 32 ether (reactivity reserve)
-        return true; // placeholder
+    /// @notice Returns the gross amount accrued to the recipient (including
+    ///         what they've already withdrawn). Useful for UI ticker display.
+    function streamedAmount(uint256 streamId) external view returns (uint256) {
+        Stream storage s = streams[streamId];
+        if (s.status == StreamStatus.None) return 0;
+        return s.ratePerSecond * _effectiveElapsed(s);
     }
 
-    /// @dev Internal balance calculation. Used by withdraw, cancel, views.
-    function _availableBalance(uint256 streamId) internal view returns (uint256) {
-        // TODO: implement Sablier-style math with paused-time exclusion
-        // See skills/skill-streaming.md "Stream math" section.
-        streamId; // silence unused-var warning
-        return 0; // placeholder
+    /// @notice Returns true if the contract is solvent across all active streams.
+    function isSolvent() external view returns (bool) {
+        return address(this).balance >= totalCommittedUnreleased + REACTIVITY_RESERVE;
+    }
+
+    struct TreasuryHealth {
+        uint256 contractBalance;
+        uint256 totalCommittedUnreleased;
+        uint256 reactivityReserve;
+        bool isHealthy;
+    }
+
+    /// @notice Surfacing function for the frontend dashboard / judges.
+    function treasuryHealth() external view returns (TreasuryHealth memory) {
+        uint256 bal = address(this).balance;
+        uint256 committed = totalCommittedUnreleased;
+        return TreasuryHealth({
+            contractBalance: bal,
+            totalCommittedUnreleased: committed,
+            reactivityReserve: REACTIVITY_RESERVE,
+            isHealthy: bal >= committed + REACTIVITY_RESERVE
+        });
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Reactivity handler hook — TODO: implement
+    //  Internal math — single source of truth for stream balance
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @dev Available balance for a stream's recipient at the current block.
+    ///      Returns 0 for None / Cancelled / Completed (terminal or unset).
+    function _availableBalance(uint256 streamId) internal view returns (uint256) {
+        Stream storage s = streams[streamId];
+        StreamStatus st = s.status;
+        if (st == StreamStatus.None) return 0;
+        if (st == StreamStatus.Cancelled) return 0;
+        if (st == StreamStatus.Completed) return 0;
+
+        uint256 accrued = s.ratePerSecond * _effectiveElapsed(s);
+        if (accrued <= s.withdrawn) return 0;
+        return accrued - s.withdrawn;
+    }
+
+    /// @dev Effective elapsed seconds within [startTime, endTime] minus all
+    ///      paused time (both completed and currently-active). Capped so that
+    ///      pauses extending past endTime don't underflow.
+    function _effectiveElapsed(Stream storage s) private view returns (uint256) {
+        if (block.timestamp <= s.startTime) return 0;
+        uint256 accrualEnd = block.timestamp < s.endTime ? block.timestamp : s.endTime;
+        uint256 totalSpan = accrualEnd - s.startTime;
+
+        uint256 pausedSpan = s.pausedAccumulated;
+        if (s.status == StreamStatus.Paused && s.pausedAt < accrualEnd) {
+            pausedSpan += accrualEnd - s.pausedAt;
+        }
+        if (pausedSpan >= totalSpan) return 0;
+        return totalSpan - pausedSpan;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Reactivity handler hook — left for Milestone 3
     // ─────────────────────────────────────────────────────────────────────
 
     /// @notice Called by the reactivity precompile when a scheduled policy
@@ -237,10 +421,8 @@ contract Drip is SomniaEventHandler {
         bytes32[] calldata /* eventTopics */,
         bytes calldata /* data */
     ) internal override {
-        // TODO: decode the firing subscription ID
-        // TODO: look up which stream it belongs to (subscriptionToStream mapping)
-        // TODO: delegate to DripPolicies.startPolicyCheck(streamId)
-        revert("TODO: implement _onEvent");
+        // Implemented in Milestone 3 (reactivity + agent integration).
+        revert("TODO: _onEvent - implement in Milestone 3");
     }
 
     // ─────────────────────────────────────────────────────────────────────
