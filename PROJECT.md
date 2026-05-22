@@ -54,13 +54,26 @@ Drip is an agentic payment streaming protocol built for the Somnia Agentathon (M
 
 ## What's built / not built
 
-Use this checklist to track progress:
+Use this checklist to track progress.
 
-- [ ] `Drip.sol` — streaming primitive (skeleton in repo, bodies marked TODO)
-- [ ] `DripPolicies.sol` — agent-control layer (skeleton in repo)
-- [ ] Hardhat config + deploy script
-- [ ] BTC price oracle smoke test (canonical first integration from SomniaDevs article)
-- [ ] Classifier determinism test (20+ runs against real GitHub data)
+**Milestone 2 — streaming primitive**
+- [x] `Drip.sol` — streaming primitive (createStream / withdraw / pause / resume / cancel / isSolvent / treasuryHealth; 50 Hardhat tests passing)
+- [x] Hardhat config + deploy script (`scripts/deploy.ts`)
+
+**Milestone 3 — agent layer**
+- [x] BTC price oracle smoke test (`contracts/contracts/smoketest/BtcPriceOracle.sol`, run May 21 against testnet)
+- [x] Classifier determinism test (26/26 invocations on testnet, 3/3 cross-validator unanimity on every case including the borderline `commitCount=2, prCount=0` case; report at `contracts/test-results/classifier-determinism-2026-05-21T15-07-56-722Z.md`)
+- [x] `DripPolicies.sol` — agent-control layer with the two-agent chain (JSON API Request → LLM Inference), strict-inconclusive dispatch, self-rescheduling Schedule subscriptions; 27 Hardhat tests passing against `MockAgentPlatform` + `TestableDrip`
+- [x] Reactivity wiring in `Drip.sol` — `scheduleStreamCheck`, `unsubscribeStreamCheck`, `_onEvent` dispatch; production-ready by inspection (real precompile path bypassed in local tests; full end-to-end testnet validation is Milestone 4 Step D)
+
+**Milestone 4 — testnet integration (in progress)**
+- [ ] GitHub activity aggregator — Next.js API route at `frontend/app/api/github-activity/route.ts`; deployed publicly so the JSON API Request agent can reach it
+- [ ] `fetchString` empty-selector validation on testnet via a smoketest contract
+- [ ] Testnet deploy of `Drip` + `DripPolicies` wired together
+- [ ] End-to-end testnet run: real stream + real policy + observed Reactivity → JSON API → LLM → action dispatch
+- [ ] `docs/TESTNET_RUN.md` capturing transaction hashes, request IDs, receipt URLs, observed timing
+
+**Milestone 5 — frontend & demo**
 - [ ] Frontend wallet connect
 - [ ] Frontend stream creation form
 - [ ] Frontend live stream balance ticker

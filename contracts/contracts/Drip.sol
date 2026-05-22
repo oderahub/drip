@@ -22,6 +22,13 @@ import {SomniaEventHandler} from "@somnia-chain/reactivity-contracts/contracts/S
 import {SomniaExtensions} from "@somnia-chain/reactivity-contracts/contracts/interfaces/SomniaExtensions.sol";
 import {ISomniaReactivityPrecompile} from "@somnia-chain/reactivity-contracts/contracts/interfaces/ISomniaReactivityPrecompile.sol";
 
+/// @dev Minimal interface the streaming primitive uses to call back into the
+///      agent-control layer when a scheduled policy check fires. Defined
+///      inline so Drip.sol stays independent of DripPolicies' full surface.
+interface IDripPoliciesCallback {
+    function startPolicyCheck(uint256 streamId) external;
+}
+
 contract Drip is SomniaEventHandler {
     // ─────────────────────────────────────────────────────────────────────
     //  Types
@@ -78,6 +85,19 @@ contract Drip is SomniaEventHandler {
     ///         This avoids O(n) iteration in isSolvent / treasuryHealth.
     uint256 public totalCommittedUnreleased;
 
+    /// @notice Maps a reactivity subscription ID to its stream. Filled by
+    ///         scheduleStreamCheck and used for off-chain inspection / cleanup.
+    ///         **Not** used inside `_onEvent` — the precompile callback delivers
+    ///         a Schedule event whose topics contain the firing timestamp, not
+    ///         the subscription ID. See `scheduleTimestampToStream` for that.
+    mapping(uint256 subscriptionId => uint256 streamId) public subscriptionToStream;
+
+    /// @notice Maps a scheduled firing timestamp (in ms, the topic the Schedule
+    ///         event carries) to its stream. This is the lookup used inside
+    ///         `_onEvent`. Timestamps are made unique per scheduling call by
+    ///         scheduleStreamCheck's collision-bump loop.
+    mapping(uint256 scheduledTimestampMs => uint256 streamId) public scheduleTimestampToStream;
+
     // ─────────────────────────────────────────────────────────────────────
     //  Events
     // ─────────────────────────────────────────────────────────────────────
@@ -96,6 +116,13 @@ contract Drip is SomniaEventHandler {
     event StreamCancelled(uint256 indexed streamId);
     event StreamCompleted(uint256 indexed streamId);
     event Withdrawal(uint256 indexed streamId, address indexed recipient, uint256 amount);
+    event StreamCheckScheduled(
+        uint256 indexed streamId,
+        uint256 indexed subscriptionId,
+        uint256 scheduledTimestampMs
+    );
+    event StreamCheckUnscheduled(uint256 indexed streamId, uint256 indexed subscriptionId);
+    event PolicyCheckDispatched(uint256 indexed streamId, uint256 scheduledTimestampMs);
 
     // ─────────────────────────────────────────────────────────────────────
     //  Errors
@@ -114,6 +141,9 @@ contract Drip is SomniaEventHandler {
     error InsufficientBalance();
     error NothingToWithdraw();
     error TransferFailed();
+    error NoPoliciesWired();
+    error UnknownSubscriptionTimestamp(uint256 timestampMs);
+    error ScheduleInPast();
 
     // ─────────────────────────────────────────────────────────────────────
     //  Modifiers
@@ -355,6 +385,19 @@ contract Drip is SomniaEventHandler {
         return address(this).balance >= totalCommittedUnreleased + REACTIVITY_RESERVE;
     }
 
+    /// @notice Convenience view: who created this stream. Used by DripPolicies
+    ///         for access control on registerPolicy / disablePolicy.
+    function streamSender(uint256 streamId) external view returns (address) {
+        return streams[streamId].sender;
+    }
+
+    /// @notice Convenience view: current lifecycle status as uint8.
+    ///         0=None, 1=Active, 2=Paused, 3=Cancelled, 4=Completed.
+    ///         Used by DripPolicies action dispatch to decide pause vs no-op.
+    function streamStatus(uint256 streamId) external view returns (uint8) {
+        return uint8(streams[streamId].status);
+    }
+
     struct TreasuryHealth {
         uint256 contractBalance;
         uint256 totalCommittedUnreleased;
@@ -409,20 +452,141 @@ contract Drip is SomniaEventHandler {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  Reactivity handler hook — left for Milestone 3
+    //  Reactivity scheduling — DripPolicies calls these
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice Schedule a one-shot reactivity callback for a stream's next
+    ///         policy check. Called by DripPolicies. Drip owns the
+    ///         subscription so the 32-STT minimum balance is held here, not
+    ///         in DripPolicies.
+    /// @param  streamId         Stream this check belongs to.
+    /// @param  secondsFromNow   Seconds until the check fires. Must be > 0.
+    /// @return subscriptionId   The precompile-assigned subscription ID.
+    /// @return scheduledMs      The actual ms timestamp the subscription
+    ///                          fires at — may be a few ms later than the
+    ///                          natural value to avoid collisions in
+    ///                          scheduleTimestampToStream.
+    /// @dev    Schedule events carry only the firing timestamp in
+    ///         eventTopics[1], not the subscription ID. We use the timestamp
+    ///         as the lookup key, so timestamps must be unique. The
+    ///         collision-bump loop guarantees this for up to ~few thousand
+    ///         simultaneously-scheduled streams without affecting timing
+    ///         (Somnia block time is ~100ms; a few-ms bump is invisible).
+    function scheduleStreamCheck(uint256 streamId, uint256 secondsFromNow)
+        external
+        onlyPolicies
+        streamExists(streamId)
+        returns (uint256 subscriptionId, uint256 scheduledMs)
+    {
+        if (secondsFromNow == 0) revert ScheduleInPast();
+
+        uint256 natural = (block.timestamp + secondsFromNow) * 1000;
+        scheduledMs = natural;
+        while (scheduleTimestampToStream[scheduledMs] != 0) {
+            unchecked { scheduledMs += 1; }
+        }
+
+        subscriptionId = _subscribeSchedule(scheduledMs);
+
+        subscriptionToStream[subscriptionId] = streamId;
+        scheduleTimestampToStream[scheduledMs] = streamId;
+
+        emit StreamCheckScheduled(streamId, subscriptionId, scheduledMs);
+    }
+
+    /// @dev Production: route through SomniaExtensions → reactivity precompile.
+    ///      Test override: bypass and return a deterministic mock id. Marked
+    ///      `internal virtual` ONLY so a Hardhat-local TestableDrip can
+    ///      override it — Hardhat's EDR intercepts address 0x0100 (the
+    ///      precompile address SomniaExtensions hardcodes) and short-circuits
+    ///      any installed bytecode there, so we can't mock at the address
+    ///      level. Override point is the next-best thing.
+    function _subscribeSchedule(uint256 scheduledMs)
+        internal
+        virtual
+        returns (uint256 subscriptionId)
+    {
+        return SomniaExtensions.scheduleSubscriptionAtTimestamp(
+            address(this),
+            scheduledMs,
+            SomniaExtensions.SubscriptionOptions({
+                priorityFeePerGas: 1,
+                maxFeePerGas: 0,             // protocol picks max
+                gasLimit: 2_000_000          // 2M — leaves 1M reserve for Somnia storage ops
+            })
+        );
+    }
+
+    /// @notice Cancel an outstanding stream-check subscription. Used by
+    ///         DripPolicies.disablePolicy and on stream cancel.
+    /// @dev    Unsubscribing while the subscription is firing in the same
+    ///         block is forbidden by skill-streaming.md "What NOT to do" #7.
+    ///         Only call from administrative paths, never from inside
+    ///         `_onEvent`.
+    function unsubscribeStreamCheck(uint256 subscriptionId, uint256 scheduledMs)
+        external
+        onlyPolicies
+    {
+        uint256 streamId = subscriptionToStream[subscriptionId];
+        // Silently no-op on already-cleaned entries so callers don't have to
+        // track whether they ever scheduled.
+        if (streamId == 0) return;
+
+        _unsubscribe(subscriptionId);
+        delete subscriptionToStream[subscriptionId];
+        if (scheduleTimestampToStream[scheduledMs] == streamId) {
+            delete scheduleTimestampToStream[scheduledMs];
+        }
+        emit StreamCheckUnscheduled(streamId, subscriptionId);
+    }
+
+    /// @dev Override point — see _subscribeSchedule's note.
+    function _unsubscribe(uint256 subscriptionId) internal virtual {
+        SomniaExtensions.unsubscribe(subscriptionId);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Reactivity handler hook
     // ─────────────────────────────────────────────────────────────────────
 
     /// @notice Called by the reactivity precompile when a scheduled policy
-    ///         check fires for a stream.
+    ///         check fires.
     /// @dev    Inherited from SomniaEventHandler. The base contract verifies
     ///         msg.sender == 0x0100 before reaching this function.
+    ///
+    ///         For a Schedule subscription firing:
+    ///         - emitter        = 0x100 (system event emitter)
+    ///         - eventTopics[0] = keccak256("Schedule(uint256)")
+    ///         - eventTopics[1] = scheduled timestamp in ms (uint256 cast)
+    ///         - data           = empty
+    ///
+    ///         We decode the timestamp, look up the stream, clear the
+    ///         lookup entry (since the subscription is one-shot and will
+    ///         auto-remove from the precompile), and delegate to
+    ///         DripPolicies.startPolicyCheck. DripPolicies is responsible
+    ///         for scheduling the *next* check from inside its agent
+    ///         callback — never from here, per skill-reactivity.md.
     function _onEvent(
         address /* emitter */,
-        bytes32[] calldata /* eventTopics */,
+        bytes32[] calldata eventTopics,
         bytes calldata /* data */
     ) internal override {
-        // Implemented in Milestone 3 (reactivity + agent integration).
-        revert("TODO: _onEvent - implement in Milestone 3");
+        if (policies == address(0)) revert NoPoliciesWired();
+
+        uint256 scheduledMs = uint256(eventTopics[1]);
+        uint256 streamId = scheduleTimestampToStream[scheduledMs];
+        if (streamId == 0) revert UnknownSubscriptionTimestamp(scheduledMs);
+
+        // Clear the timestamp entry — the subscription has fired and is
+        // auto-removed precompile-side. We can't safely clear
+        // subscriptionToStream here because we don't have the subscription
+        // ID; it stays until disablePolicy or scheduling a replacement
+        // collides. That's a slow memory leak; acceptable for the hackathon
+        // and easy to clean up later.
+        delete scheduleTimestampToStream[scheduledMs];
+
+        emit PolicyCheckDispatched(streamId, scheduledMs);
+        IDripPoliciesCallback(policies).startPolicyCheck(streamId);
     }
 
     // ─────────────────────────────────────────────────────────────────────

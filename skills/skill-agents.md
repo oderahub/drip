@@ -281,7 +281,56 @@ The receipts web UI at `https://agents.testnet.somnia.network/receipts/{requestI
 - Bandwidth and LLM token usage
 - Structured error fields
 
-**The documented programmatic endpoint** `https://receipts.testnet.agents.somnia.host?requestId=X` **currently returns 404** on all variations tested. Use the web UI URL.
+### Programmatic receipts API
+
+```
+GET https://receipts.testnet.agents.somnia.host/agent-receipts
+    ?requestId={requestId}
+    &contractAddress={PLATFORM_CONTRACT_ADDRESS}
+    [&type=minimal]
+```
+
+| Parameter | Required | Purpose |
+|---|---|---|
+| `requestId` | yes | The request ID returned by `platform.createRequest`. |
+| `contractAddress` | **yes — the PLATFORM contract address, not the requester's** | The receipts service indexes by platform address (testnet: `0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776`). Passing the requester address silently returns `count: 0`. This is the most common reason this endpoint appears "broken". |
+| `type=minimal` | optional | Returns inline JSON with `agentReceipt` populated. Without `type=minimal`, `receipts[i]` is a `storage.googleapis.com/agent-receipts-testnet/...` URL that must be fetched separately (or proxied through the SPA's `/api/receipts?url=...` endpoint, which only allows GCS URLs). |
+
+Response shape (with `type=minimal`):
+
+```json
+{
+  "contractAddress": "0x037bb9...",
+  "requestId": "919585",
+  "count": 3,
+  "receipts": [
+    {
+      "requestId": "919585",
+      "agentId": "12847293847561029384",
+      "status": "success",
+      "startedAt": "...", "completedAt": "...", "elapsedMs": 218,
+      "agentImageUri": "https://storage.googleapis.com/.../5a2c2130....tar",
+      "agentReceipt": {
+        "bandwidthUsage": { "bytesIn": 0, "bytesOut": 0, "requests": 0 },
+        "llmUsage": {
+          "promptTokens": 276, "completionTokens": 6,
+          "requests": 1, "streamingRequests": 0, "totalTokens": 282
+        },
+        "result": "0x0000...0006...616374697665...",  // abi-encoded inferString return
+        "request": "<truncated>"
+      },
+      "response": { ... }
+    },
+    /* one entry per subcommittee validator */
+  ]
+}
+```
+
+The `agentReceipt.result` field is the ABI-encoded return value of the agent method invocation. For `inferString` (LLM Inference), `decodeAbiParameters([{type:"string"}], result)` gives back the verdict.
+
+**Note**: previously this endpoint was reported as 404; the issue was undocumented required parameters. With the correct `contractAddress` (the platform, not the requester) and the `agent-receipts` path, it returns JSON. The "404" entry in earlier versions of this skill was wrong.
+
+For ad-hoc inspection without scripting, the web UI at `https://agents.testnet.somnia.network/receipts/{requestId}` is faster — it consumes this same API client-side.
 
 ## Agent Explorer
 

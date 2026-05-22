@@ -99,6 +99,10 @@ const MAX_U256 = (1n << 256n) - 1n;
 // the test is robust to viem's decoding quirks.
 const ERR = {
   NotPolicies: "6d3e5063",
+  InvalidStream: "a0f87d33",
+  NoPoliciesWired: "1e0ccffc",
+  UnknownSubscriptionTimestamp: "8746a4d9",
+  ScheduleInPast: "fbcd5340",
 } as const;
 
 /** Run `op` and assert it rejects with either the named custom error or its selector. */
@@ -381,9 +385,11 @@ describe("Drip.withdraw", () => {
 
   it("reverts on InvalidStream for non-existent id", async () => {
     const { drip, recipient } = await loadFixture(deployDripFixture);
-    await expect(
-      drip.write.withdraw([9999n, MAX_U256], { account: recipient.account })
-    ).to.be.rejectedWith(/InvalidStream/);
+    await expectRevertWith(
+      drip.write.withdraw([9999n, MAX_U256], { account: recipient.account }),
+      "InvalidStream",
+      ERR.InvalidStream
+    );
   });
 
   it("respects paused-time exclusion: cannot withdraw time spent paused", async () => {
