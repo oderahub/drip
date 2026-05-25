@@ -23,6 +23,24 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
+/**
+ * Top-level shape served to clients.
+ *
+ * The `json` field is a string containing a JSON serialization of the
+ * activity payload (sans `json` itself, to avoid infinite recursion). It
+ * exists for the Somnia JSON API Request agent: validators call
+ * `fetchString(url, "json")` to extract this single string, which is
+ * appended verbatim to the classifier prompt. We learned in Milestone 4
+ * Step B that the agent's empty-selector behaviour returns Go's default
+ * map representation (with scientific notation on large numbers), which
+ * the M3 determinism suite never verified the classifier against. Using
+ * the `json` wrapper sidesteps that by giving the agent a clean string to
+ * fetch.
+ *
+ * The other top-level fields are kept for off-chain consumers (the
+ * frontend dashboard, debugging, third-party integrations) — they're
+ * properly typed JSON values and easier to consume from JS.
+ */
 interface ActivityResponse {
   username: string;
   repo: string;
@@ -30,6 +48,7 @@ interface ActivityResponse {
   commitCount: number;
   prCount: number;
   lastCommitTimestamp: number;
+  json: string;
 }
 
 interface ErrorResponse {
@@ -190,13 +209,21 @@ export async function GET(req: NextRequest): Promise<NextResponse<ActivityRespon
       countPRs(owner, repo, username, sinceMs, nowMs),
     ]);
 
-    const payload: ActivityResponse = {
+    const core = {
       username,
       repo: repoParam,
       windowDays,
       commitCount: commits.length,
       prCount,
       lastCommitTimestamp: lastCommitTimestamp(commits),
+    };
+    const payload: ActivityResponse = {
+      ...core,
+      // Stringified inner payload. Note this is the SAME object minus the
+      // `json` field — DripPolicies feeds this string verbatim to the
+      // classifier, and the M3 determinism suite verified the classifier
+      // against exactly this shape (six top-level fields, plain JSON).
+      json: JSON.stringify(core),
     };
     return NextResponse.json(payload, {
       status: 200,
