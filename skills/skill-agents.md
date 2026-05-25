@@ -168,6 +168,36 @@ fetchUintArray(string url, string selector, uint8 decimals) returns (uint256[])
 
 Drip's `contracts/contracts/interfaces/IJsonApiAgent.sol` covers four of these. `fetchInt` and `fetchBool` are not exposed there — add them if a future use case needs them.
 
+### The fetchString empty-selector trap (Milestone 4 finding)
+
+**Do not call `fetchString(url, "")` and expect the raw response body.**
+
+Empirically (testnet probe request `1964766`, May 2026), the agent's empty-selector path parses the response as JSON, then serializes the parsed object with Go's default `Stringer` — producing output like:
+
+```
+map[commitCount:35 lastCommitTimestamp:1.776807254e+09 prCount:0 repo:vercel/next.js username:ijjk windowDays:90]
+```
+
+Three problems:
+1. Numbers are rendered in scientific notation (`1.776807254e+09` not `1776807254`).
+2. The output is Go's map representation, not JSON — unparseable by anything downstream.
+3. This format was never determinism-verified against any LLM classifier prompt.
+
+**The canonical workaround**: for any multi-field payload, wrap your aggregator response in a single top-level `json` field whose value is the stringified inner payload, and call `fetchString(url, "json")`. Example aggregator response:
+
+```json
+{
+  "username": "ijjk", "repo": "vercel/next.js",
+  "windowDays": 90, "commitCount": 35, "prCount": 0,
+  "lastCommitTimestamp": 1776807254,
+  "json": "{\"username\":\"ijjk\",\"repo\":\"vercel/next.js\",\"windowDays\":90,\"commitCount\":35,\"prCount\":0,\"lastCommitTimestamp\":1776807254}"
+}
+```
+
+The top-level fields stay JSON-typed for off-chain consumers (frontend, debugging). The on-chain agent fetches just the `json` field — a clean string with the wire format your classifier was verified against. Validated end-to-end against the live JSON API agent on Somnia testnet; 3/3 validators returned unanimous result bytes.
+
+Field selectors with simple top-level paths (e.g. `"username"`) work as documented and return the literal field value as a string. The trap is specifically the empty selector.
+
 ### LLM Inference — four methods (live)
 
 ```
