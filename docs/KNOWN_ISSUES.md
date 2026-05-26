@@ -68,17 +68,13 @@ Both contracts trust each other implicitly. There are no `nonReentrant` guards b
 
 ## Agent integration
 
-### 6. Empty-selector `fetchString` semantics not yet testnet-verified
+### 6. Empty-selector `fetchString` returns Go-map repr — RESOLVED via the `json`-wrapper pattern
 
-**Where**: `DripPolicies.startPolicyCheck` invokes `JsonApiAgent.fetchString(dataUrl, dataSelector)` with `dataSelector = ""` (empty string) when the policy is registered with the default config.
+**Status**: **RESOLVED in Milestone 4 Step B.**
 
-**Assumption**: empty selector returns the entire response body as a string.
+The probe at request [`1964766`](https://agents.testnet.somnia.network/receipts/1964766) showed that `fetchString(url, "")` returns Go's default `map[k:v]` stringification with scientific notation on large numbers — not the raw JSON body. The aggregator now wraps the activity payload in a top-level `json` field whose value is a byte-identical stringified copy of the canonical payload; `DripPolicies` calls `fetchString(url, "json")` which returns that string cleanly.
 
-**Status**: **unverified on testnet**. The skill file documents `fetchString(url, selector)` but doesn't specify selector behaviour for empty input. The empirical-classifier suite (Milestone 3 Step 1) used a different agent (`inferString`), not `fetchString`. The original BTC oracle smoketest used `fetchUint` with a specific JSON-path selector (`"bitcoin.usd"`).
-
-**Plan to resolve**: Milestone 4 Step B builds `AggregatorSmoketest.sol` that issues `fetchString(<aggregator URL>, "")` and confirms the returned bytes decode as the full JSON body our aggregator served. If empty selector behaves differently, we either fall back to a `"."` selector or restructure the aggregator response to expose every field at a known JSON path.
-
-**Workaround if it fails**: store a single `data` field at the top level and use selector `"data"` — the wrapped JSON string is the entire activity payload.
+Documented in `skills/skill-agents.md` "The fetchString empty-selector trap" so future contributors don't rediscover the issue.
 
 ### 7. `getRequest` reverts on finalised requests
 
@@ -142,18 +138,23 @@ Operationally fine but means a key compromise has full blast radius. Production 
 
 The aggregator that returns the canonical `{username, repo, windowDays, commitCount, prCount, lastCommitTimestamp}` JSON does not yet exist. Milestone 4 Step A builds it as a Next.js API route and deploys to Vercel. Until then, no real GitHub data can be consumed by `DripPolicies` on testnet.
 
-### 14. End-to-end testnet run not yet performed
+### 14. End-to-end testnet run — RESOLVED (Milestone 4 Step D)
 
-**Where**: full chain — Drip + DripPolicies + reactivity + JSON API + LLM Inference — has never run together on testnet.
+**Status**: full chain ran successfully on Somnia testnet on 2026-05-26. A self-stream with a fake-username policy was paused autonomously by the AI agent within 70 seconds of registration. Three validators reached unanimous consensus on `"dormant"` with identical token counts. See [`docs/TESTNET_RUN.md`](./TESTNET_RUN.md) for the full transaction-by-transaction audit trail (every tx hash, request ID, and receipt URL is independently verifiable).
 
-Each individual leg is verified:
-- Streaming math: 50 local tests pass.
-- Agent-control logic: 27 local tests pass against mocks.
-- Reactivity wiring: production-ready by inspection; runtime path bypassed in tests via `TestableDrip`.
-- Classifier determinism: 26/26 invocations on testnet (Milestone 3 Step 1).
-- JSON API path: BTC oracle smoke test (Milestone 1) verified the agent type works.
+### 15. Reactivity Schedule's `topic[1]` is the firing time, not the requested time — RESOLVED
 
-But the composition has never run together. Milestone 4 Step D is the first time.
+**Where**: empirically discovered in Milestone 4 Step D first attempt (`Drip` at `0x71f1…95dc` — now obsolete).
+
+When a `Schedule` subscription fires, the precompile delivers `eventTopics[1]` as the **actual firing time** with sub-second precision, NOT the `timestampMillis` we passed to `scheduleSubscriptionAtTimestamp`. We observed a 41-ms offset between the requested time (`1779755353000`) and the firing time (`1779755353041`). The filter still matches because Schedule subscriptions treat `topic[1]` as a **lower bound** (per `skill-reactivity.md`: "fires in the first block whose timestamp ≥ topic[1]"), not as an exact-match filter component.
+
+`Drip._onEvent`'s original exact-match lookup `scheduleTimestampToStream[topic[1]]` always failed for this reason.
+
+**Fix** (in `Drip.sol`):
+- `scheduleStreamCheck` bumps the collision counter by 1000 ms (one full second), not 1 ms, so every stored `scheduledMs` ends in `000`.
+- `_onEvent` rounds the firing time down to the nearest whole second: `scheduledMs = (uint256(topic[1]) / 1000) * 1000`. Falls back to `scheduledMs - 1000` in case the precompile slipped into the next second.
+
+The skill file `skill-reactivity.md` has been updated to document this empirically (Schedule's `topic[1]` semantics gotcha). The first deployment's STT (35 STT in `Drip 0x71f1…95dc`) is unrecoverable — a sunk cost of the discovery.
 
 ---
 

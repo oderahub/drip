@@ -186,10 +186,32 @@ Inside `_onEvent`:
 For a Schedule subscription firing:
 - `emitter == 0x100`
 - `eventTopics[0] == keccak256("Schedule(uint256)")`
-- `eventTopics[1] == timestamp in ms` (the scheduled time)
+- `eventTopics[1] ==` **the actual firing time in ms (with sub-second precision)**, not the requested scheduled time — see the gotcha below
 - `data` is empty
 
-To know **which stream** to check, encode the stream ID into the Schedule subscription's filter or maintain a `mapping(uint256 subscriptionId => uint256 streamId)`. Drip uses the latter for clarity.
+### Gotcha: Schedule's `topic[1]` is the firing time, not the request time (Milestone 4 finding)
+
+Verified empirically on Somnia testnet: when a Schedule subscription fires, `eventTopics[1]` in the callback is the **actual firing time** (the precompile's internal clock at the moment of firing), with sub-second precision. It is **NOT** the `timestampMillis` we passed to `scheduleSubscriptionAtTimestamp`.
+
+The filter still matches because Schedule subscriptions use a **lower-bound** semantic on `topic[1]`: the precompile fires "in the first block whose timestamp ≥ topic[1]" (per the table above). So our requested value `T` is treated as a floor, and the firing time `T + ε` ≥ `T` satisfies the filter.
+
+Practical consequence: a handler that does
+
+```solidity
+uint256 scheduledMs = uint256(eventTopics[1]);
+uint256 streamId = scheduleTimestampToStream[scheduledMs];   // EXACT match
+```
+
+will reliably fail with the value we stored, because `scheduledMs` ≠ `requested_ms`. In our testnet run we saw a 41-ms offset (request `1779755353000`, firing `1779755353041`).
+
+**The fix in Drip**: round the firing time down to the nearest whole second AND ensure every scheduled timestamp we register is a whole-second multiple. Specifically:
+
+1. `scheduleStreamCheck` computes `scheduledMs = (block.timestamp + secondsFromNow) * 1000`, which always ends in `000`. On collision, bump by `1000` (a full second), not by `1`.
+2. `_onEvent` does `scheduledMs = (uint256(eventTopics[1]) / 1000) * 1000` to recover the whole-second key, with a fallback to `scheduledMs - 1000` in case the precompile slipped into the next second before firing.
+
+See `Drip._onEvent` and `Drip.scheduleStreamCheck` for the implementation.
+
+To know **which stream** to check, encode the stream ID into the Schedule subscription's filter or maintain a `mapping(uint256 subscriptionId => uint256 streamId)`. Drip uses the latter (plus the `scheduleTimestampToStream` mapping keyed by the whole-second timestamp) for clarity.
 
 ## Automatic removal — when subscriptions die
 

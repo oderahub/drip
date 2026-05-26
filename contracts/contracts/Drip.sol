@@ -482,8 +482,17 @@ contract Drip is SomniaEventHandler {
 
         uint256 natural = (block.timestamp + secondsFromNow) * 1000;
         scheduledMs = natural;
+        // Bump by FULL SECONDS, not 1 ms. The reactivity precompile reports
+        // the actual firing time in the Schedule event's topic[1] — with
+        // sub-second precision — NOT the requested time. So _onEvent rounds
+        // the firing topic DOWN to the nearest second to look up the stream.
+        // For that round-down to work, every scheduledMs we store must be a
+        // whole-second multiple (ends in 000). Hence: bump by 1000.
+        // Trade-off: collisions shift the colliding stream by 1 full second
+        // instead of 1 ms. Acceptable — Somnia's block time is ~100 ms, so
+        // a 1-second shift just means firing one block later than ideal.
         while (scheduleTimestampToStream[scheduledMs] != 0) {
-            unchecked { scheduledMs += 1; }
+            unchecked { scheduledMs += 1000; }
         }
 
         subscriptionId = _subscribeSchedule(scheduledMs);
@@ -573,9 +582,28 @@ contract Drip is SomniaEventHandler {
     ) internal override {
         if (policies == address(0)) revert NoPoliciesWired();
 
-        uint256 scheduledMs = uint256(eventTopics[1]);
+        // Empirical Somnia behaviour (Milestone 4 testnet-run discovery):
+        // the Schedule event's topic[1] is the ACTUAL firing time with
+        // sub-second precision, NOT the requested scheduledMs we registered.
+        // Our scheduledMs values always end in `000` (whole-second multiples)
+        // because scheduleStreamCheck bumps by 1000 on collision. Round
+        // the firing time down to the nearest whole second to recover the
+        // mapping key.
+        //
+        // The precompile's filter for Schedule events treats topic[1] as a
+        // LOWER BOUND on firing time (per `skill-reactivity.md`: "fires in
+        // the first block whose timestamp ≥ topic[1]") — that's why our
+        // subscription matched despite the topic mismatch.
+        uint256 firingMs = uint256(eventTopics[1]);
+        uint256 scheduledMs = (firingMs / 1000) * 1000;
         uint256 streamId = scheduleTimestampToStream[scheduledMs];
-        if (streamId == 0) revert UnknownSubscriptionTimestamp(scheduledMs);
+        if (streamId == 0) {
+            // Edge case: if the precompile slipped into the next second
+            // before firing, the requested second is one back.
+            unchecked { scheduledMs -= 1000; }
+            streamId = scheduleTimestampToStream[scheduledMs];
+        }
+        if (streamId == 0) revert UnknownSubscriptionTimestamp(firingMs);
 
         // Clear the timestamp entry — the subscription has fired and is
         // auto-removed precompile-side. We can't safely clear

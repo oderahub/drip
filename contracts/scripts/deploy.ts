@@ -69,10 +69,13 @@ async function main() {
   console.log(` DripPolicies:      ${dripPolicies.address}`);
   console.log("");
 
-  // 3. Wire Drip → DripPolicies
+  // 3. Wire Drip → DripPolicies (await receipt explicitly — viem's write
+  //    returns the hash before mining, so the policies() readback below
+  //    must wait for confirmation or it sees stale state).
   console.log(" Wiring Drip → DripPolicies...");
-  await drip.write.setPolicies([dripPolicies.address]);
-  console.log(" Wired.");
+  const wireHash = await drip.write.setPolicies([dripPolicies.address]);
+  await publicClient.waitForTransactionReceipt({ hash: wireHash });
+  console.log(` Wired. (tx ${wireHash})`);
   console.log("");
 
   // 4. Verify final state
