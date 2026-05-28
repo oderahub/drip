@@ -42,6 +42,34 @@ const config: HardhatUserConfig = {
       accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
     },
   },
+  // Source-code verification via the Shannon block explorer (Blockscout,
+  // Etherscan-compatible API). Blockscout ignores the apiKey value but the
+  // plugin requires it to be non-empty.
+  etherscan: {
+    apiKey: {
+      somniaTestnet: "blockscout-no-key-needed",
+      somniaMainnet: "blockscout-no-key-needed",
+    },
+    customChains: [
+      {
+        network: "somniaTestnet",
+        chainId: 50312,
+        urls: {
+          apiURL: "https://shannon-explorer.somnia.network/api",
+          browserURL: "https://shannon-explorer.somnia.network",
+        },
+      },
+      {
+        network: "somniaMainnet",
+        chainId: 5031,
+        urls: {
+          apiURL: "https://explorer.somnia.network/api",
+          browserURL: "https://explorer.somnia.network",
+        },
+      },
+    ],
+  },
+  sourcify: { enabled: false },
 };
 
 export default config;
