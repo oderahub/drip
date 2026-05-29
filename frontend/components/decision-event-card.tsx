@@ -11,8 +11,15 @@ import {
   PlayCircle,
   CircleDot,
   ExternalLink,
+  Droplets,
+  ArrowDownToLine,
+  CircleSlash,
+  CircleCheck,
+  ShieldOff,
+  AlertTriangle,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatStt, shortAddress } from "@/lib/utils";
+import type { Address } from "viem";
 
 /**
  * The data shape for one event in the agent decision feed.
@@ -58,7 +65,42 @@ export type FeedEvent =
       timestamp: Date;
       kind: "pause" | "resume" | "noop";
       verdict: "active" | "dormant" | "inconclusive";
+    }
+  | {
+      type: "stream-created";
+      timestamp: Date;
+      sender: Address;
+      recipient: Address;
+      totalAmount: bigint;
+      durationSec: bigint;
+    }
+  | {
+      type: "withdrawal";
+      timestamp: Date;
+      recipient: Address;
+      amount: bigint;
+    }
+  | {
+      type: "stream-cancelled";
+      timestamp: Date;
+    }
+  | {
+      type: "stream-completed";
+      timestamp: Date;
+    }
+  | {
+      type: "policy-disabled";
+      timestamp: Date;
+    }
+  | {
+      type: "check-aborted";
+      timestamp: Date;
+      phase: "fetching-github" | "classifying";
+      status: "failed" | "timed-out";
     };
+
+/** Numeric key per event for the resilient feed's dedup compaction. */
+export type FeedEventKind = FeedEvent["type"];
 
 export type Surface = "light" | "onDark";
 
@@ -124,6 +166,48 @@ function visualFor(event: FeedEvent): VisualSpec {
               : "No action taken",
         light: actionTextLight(event.kind),
         onDark: actionTextOnDark(event.kind),
+      };
+    case "stream-created":
+      return {
+        icon: Droplets,
+        label: "Stream created",
+        light: "text-primary",
+        onDark: "text-primary",
+      };
+    case "withdrawal":
+      return {
+        icon: ArrowDownToLine,
+        label: "Recipient withdrew",
+        light: "text-primary",
+        onDark: "text-primary",
+      };
+    case "stream-cancelled":
+      return {
+        icon: CircleSlash,
+        label: "Stream cancelled",
+        light: "text-state-cancelled",
+        onDark: "text-slate-300",
+      };
+    case "stream-completed":
+      return {
+        icon: CircleCheck,
+        label: "Stream completed",
+        light: "text-state-completed",
+        onDark: "text-teal-300",
+      };
+    case "policy-disabled":
+      return {
+        icon: ShieldOff,
+        label: "Policy disabled",
+        light: "text-muted-foreground",
+        onDark: "text-white/60",
+      };
+    case "check-aborted":
+      return {
+        icon: AlertTriangle,
+        label: "Check aborted",
+        light: "text-state-inconclusive",
+        onDark: "text-amber-300",
       };
   }
 }
@@ -382,6 +466,56 @@ function Body({ event, surface }: { event: FeedEvent; surface: Surface }) {
         </p>
       );
     }
+
+    case "stream-created":
+      return (
+        <p className={cn("text-sm leading-relaxed", text)}>
+          <span className={cn("font-mono text-xs", mono)}>{shortAddress(event.sender)}</span>
+          {" → "}
+          <span className={cn("font-mono text-xs", mono)}>{shortAddress(event.recipient)}</span>
+          {" · "}
+          <span className={strong}>{formatStt(event.totalAmount, 4)}</span> STT over{" "}
+          {Number(event.durationSec)} s.
+        </p>
+      );
+
+    case "withdrawal":
+      return (
+        <p className={cn("text-sm leading-relaxed", text)}>
+          <span className={cn("font-mono text-xs", mono)}>{shortAddress(event.recipient)}</span>
+          {" pulled "}
+          <span className={strong}>{formatStt(event.amount, 4)}</span> STT.
+        </p>
+      );
+
+    case "stream-cancelled":
+      return (
+        <p className={cn("text-sm leading-relaxed", text)}>
+          Sender pulled out. Accrued share went to recipient; remainder refunded.
+        </p>
+      );
+
+    case "stream-completed":
+      return (
+        <p className={cn("text-sm leading-relaxed", text)}>
+          Duration elapsed and final balance withdrawn. Nothing left to flow.
+        </p>
+      );
+
+    case "policy-disabled":
+      return (
+        <p className={cn("text-sm leading-relaxed", text)}>
+          Agent chain stopped. No further scheduled checks will fire for this stream.
+        </p>
+      );
+
+    case "check-aborted":
+      return (
+        <p className={cn("text-sm leading-relaxed", text)}>
+          {event.phase === "fetching-github" ? "JSON API" : "LLM Inference"} leg returned{" "}
+          <span className={strong}>{event.status}</span>. Next check still scheduled — chain doesn&apos;t get stuck.
+        </p>
+      );
   }
 }
 
