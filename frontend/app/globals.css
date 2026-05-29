@@ -52,6 +52,30 @@
     --destructive: 1 78% 53%;            /* #e62d28 */
     --destructive-foreground: 0 0% 98%;
 
+    /* Stream / verdict / action state tokens — see docs/UI_DESIGN_DECISIONS.md.
+       Each state has a `text` token (saturated, for the foreground glyph) and
+       a `bg` token (very pale, for the pill background). The bg tokens are
+       solid pastels rather than `/10` opacity overlays so they look identical
+       on cream and on white cards. */
+
+    /* Paused: indigo. The cool hue intentionally breaks the warm palette so
+       the demo's most-shown state pops at a glance. */
+    --state-paused: 243 75% 51%;         /* #4f46e5 indigo-600 */
+    --state-paused-bg: 239 80% 96%;      /* #eef2ff indigo-50 */
+
+    /* Inconclusive: amber. "Deferred / agent didn't make a confident call." */
+    --state-inconclusive: 33 92% 35%;    /* #b45309 amber-700 */
+    --state-inconclusive-bg: 49 100% 95%; /* #fef9c3 amber-50 */
+
+    /* Completed: teal. Cooler cousin of emerald — "fully delivered". */
+    --state-completed: 173 80% 32%;      /* #0d9488 teal-600 */
+    --state-completed-bg: 166 76% 95%;   /* #ccfbf1 teal-50 */
+
+    /* Cancelled: slate neutral. Pulled-out streams shouldn't fight for
+       attention; a small destructive dot in the pill conveys the rest. */
+    --state-cancelled: 215 16% 47%;      /* #64748b slate-500 */
+    --state-cancelled-bg: 220 14% 96%;   /* #f1f5f9 slate-100 */
+
     /* Pillow-soft radius — arcpay's signature */
     --radius: 0.875rem;
 
@@ -88,6 +112,21 @@
     --warning-foreground: 215 28% 9%;
     --destructive: 1 70% 60%;
     --destructive-foreground: 0 0% 98%;
+
+    /* State tokens — dark mode. The text values brighten so they pass
+       contrast on the near-black surface; the bg values become tinted dark
+       cards (the foreground colour at very low saturation/lightness). */
+    --state-paused: 234 89% 74%;          /* #818cf8 indigo-400 */
+    --state-paused-bg: 234 60% 16%;       /* deep indigo card tint */
+
+    --state-inconclusive: 35 91% 65%;     /* #fbbf24 amber-400 */
+    --state-inconclusive-bg: 35 50% 14%;  /* deep amber card tint */
+
+    --state-completed: 172 66% 50%;       /* #2dd4bf teal-400 */
+    --state-completed-bg: 172 50% 13%;    /* deep teal card tint */
+
+    --state-cancelled: 215 20% 65%;       /* #94a3b8 slate-400 */
+    --state-cancelled-bg: 215 15% 14%;    /* deep slate card tint */
 
     color-scheme: dark;
   }

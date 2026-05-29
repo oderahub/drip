@@ -6,6 +6,10 @@ Drip turns AI judgment into autonomous payment flows. When a contributor stops d
 
 sharp proof:
 > AI consensus can autonomously govern money flows.
+
+> Autonomous conditional streaming for grants, bounties, and contributor funding.
+
+> Grant streams that automatically pause when public progress signals disappear.
 ---
 
 ## Why this exists

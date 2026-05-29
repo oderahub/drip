@@ -68,6 +68,26 @@ const config: Config = {
           dark: "hsl(var(--surface-dark))",
           "dark-foreground": "hsl(var(--surface-dark-foreground))",
         },
+        // Stream / verdict / action state colours.
+        // Usage: `text-state-paused bg-state-paused-bg` for the pill,
+        // `bg-state-paused/10` for a translucent tint on a card.
+        // See docs/UI_DESIGN_DECISIONS.md for the palette rationale.
+        "state-paused": {
+          DEFAULT: "hsl(var(--state-paused))",
+          bg: "hsl(var(--state-paused-bg))",
+        },
+        "state-inconclusive": {
+          DEFAULT: "hsl(var(--state-inconclusive))",
+          bg: "hsl(var(--state-inconclusive-bg))",
+        },
+        "state-completed": {
+          DEFAULT: "hsl(var(--state-completed))",
+          bg: "hsl(var(--state-completed-bg))",
+        },
+        "state-cancelled": {
+          DEFAULT: "hsl(var(--state-cancelled))",
+          bg: "hsl(var(--state-cancelled-bg))",
+        },
       },
       borderRadius: {
         lg: "var(--radius)",
