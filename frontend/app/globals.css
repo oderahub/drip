@@ -2,11 +2,161 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  color-scheme: dark;
+/*
+ * Drip design tokens
+ *
+ * Light mode default: warm cream background + white cards + dark "moment"
+ * sections (inspired by arcpay-somnia.vercel.app's structure).
+ *
+ * Brand primary: emerald — chosen for the "active streaming / flowing
+ * value" semantic. Pairs with a warm gold accent.
+ *
+ * All values are HSL so Tailwind's color utilities can apply opacity
+ * (`bg-primary/10`, `text-foreground/70`, etc.).
+ */
+
+@layer base {
+  :root {
+    /* Surfaces */
+    --background: 36 24% 96%;            /* #f8f6f3 warm cream */
+    --foreground: 215 28% 9%;            /* #0d1218 near-black */
+    --card: 0 0% 100%;                   /* #ffffff pure white cards */
+    --card-foreground: 215 28% 9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 28% 9%;
+
+    /* Dark "moment" surface for callouts inside an otherwise light page */
+    --surface-dark: 215 32% 9%;          /* #0e141c */
+    --surface-dark-foreground: 36 24% 96%;
+
+    /* Brand */
+    --primary: 158 79% 30%;              /* #099268 emerald */
+    --primary-foreground: 150 67% 96%;   /* #ecfdf5 light emerald tint */
+    --accent: 42 87% 67%;                /* #f5c761 warm gold */
+    --accent-foreground: 215 28% 9%;
+
+    /* Neutrals — warm cast (arcpay pattern) */
+    --secondary: 35 17% 93%;             /* #f1eee9 */
+    --secondary-foreground: 215 22% 11%;
+    --muted: 35 17% 93%;                 /* #f1eee9 */
+    --muted-foreground: 215 8% 40%;      /* #5c646d */
+    --border: 35 13% 86%;                /* #e1ddd7 */
+    --input: 33 18% 89%;                 /* #e8e4dd */
+    --ring: 158 79% 30%;                 /* emerald focus ring */
+
+    /* Semantic state colors */
+    --success: 152 96% 33%;              /* #04ab62 */
+    --success-foreground: 150 67% 96%;
+    --warning: 35 86% 56%;               /* #efa831 */
+    --warning-foreground: 215 28% 9%;
+    --destructive: 1 78% 53%;            /* #e62d28 */
+    --destructive-foreground: 0 0% 98%;
+
+    /* Pillow-soft radius — arcpay's signature */
+    --radius: 0.875rem;
+
+    color-scheme: light;
+  }
+
+  .dark {
+    --background: 215 36% 4%;            /* #06090d */
+    --foreground: 36 24% 96%;
+    --card: 215 32% 9%;                  /* #0e141c */
+    --card-foreground: 36 24% 96%;
+    --popover: 215 32% 9%;
+    --popover-foreground: 36 24% 96%;
+
+    --surface-dark: 215 36% 4%;
+    --surface-dark-foreground: 36 24% 96%;
+
+    --primary: 158 64% 40%;              /* #10b981 emerald-500, brighter in dark */
+    --primary-foreground: 215 36% 4%;
+    --accent: 42 87% 67%;
+    --accent-foreground: 215 28% 9%;
+
+    --secondary: 215 22% 13%;
+    --secondary-foreground: 36 24% 96%;
+    --muted: 215 22% 13%;
+    --muted-foreground: 215 11% 64%;
+    --border: 0 0% 100% / 0.10;
+    --input: 0 0% 100% / 0.12;
+    --ring: 158 64% 40%;
+
+    --success: 152 64% 40%;
+    --success-foreground: 215 36% 4%;
+    --warning: 35 86% 60%;
+    --warning-foreground: 215 28% 9%;
+    --destructive: 1 70% 60%;
+    --destructive-foreground: 0 0% 98%;
+
+    color-scheme: dark;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    /* Improve text quality on macOS/iOS */
+    font-feature-settings: "ss01", "cv11";
+  }
+
+  /* Numeric content (balances, addresses, request IDs) should never jitter */
+  .font-numeric {
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+
+  /* Custom focus ring — emerald, not browser blue */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* Smooth scroll for in-page anchor links */
+  html {
+    scroll-behavior: smooth;
+  }
+
+  /* Selection */
+  ::selection {
+    @apply bg-primary/20 text-foreground;
+  }
 }
 
-body {
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+@layer utilities {
+  /* Skeleton loader background */
+  .skeleton {
+    @apply relative overflow-hidden bg-muted/60;
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      hsl(var(--foreground) / 0.04) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2s linear infinite;
+  }
+
+  /* Subtle grain texture for dark hero/callout sections */
+  .bg-grain {
+    background-image: radial-gradient(
+      circle at 1px 1px,
+      rgb(255 255 255 / 0.04) 1px,
+      transparent 0
+    );
+    background-size: 24px 24px;
+  }
+
+  /* Soft glow ring used on the primary CTA */
+  .ring-glow-primary {
+    box-shadow:
+      0 0 0 1px hsl(var(--primary) / 0.4),
+      0 10px 30px -10px hsl(var(--primary) / 0.55);
+  }
 }

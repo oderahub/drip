@@ -1,102 +1,119 @@
 /**
- * Drip — landing page placeholder.
+ * Drip landing page — Phase 1 skeleton.
  *
- * The five demo surfaces, sketched as static markup. Wire up with Wagmi +
- * Viem in Claude Code. These are the surfaces:
- *
- *   1. Hero — what Drip is
- *   2. Stream creation form
- *   3. Stream list (active / paused / completed)
- *   4. Live balance ticker (per-stream)
- *   5. Agent decision feed — THE DEMO MAGIC MOMENT
- *
- * If you build nothing else fancy, build #5 well. Read events from
- * DripPolicies and render them as a real-time activity log.
+ * The hero + a single verified-determinism strip so we can boot the dev
+ * server and confirm the design system is wired correctly. The full
+ * three-pillar grid, dark "watch the agent decide" moment section, and
+ * CTA footer ship in Phase 3.
  */
+
+import Link from "next/link";
+import { ArrowUpRight, Sparkles } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { VERIFIED_RUN } from "@/lib/contracts";
 
 export default function Home() {
   return (
-    <main className="mx-auto max-w-6xl px-6 py-12">
+    <>
       {/* Hero */}
-      <section className="mb-16">
-        <p className="text-drip-accent text-sm font-medium uppercase tracking-wider mb-3">
-          Built for the Somnia Agentathon
-        </p>
-        <h1 className="text-5xl font-bold tracking-tight mb-6">
-          Payment streams that watch themselves.
-        </h1>
-        <p className="text-xl text-drip-muted max-w-2xl leading-relaxed">
-          Drip composes Somnia&apos;s on-chain agents with token streaming. When a
-          contributor stops shipping, an AI reaches consensus that they&apos;ve gone
-          dormant — and the stream pauses itself. No multisig. No governance vote.
-          No human in the loop.
-        </p>
+      <section className="relative overflow-hidden">
+        <div className="container relative pb-20 pt-16 sm:pt-24 lg:pt-32">
+          <div className="mx-auto max-w-3xl text-center">
+            <Badge variant="default" className="mb-6 gap-1.5 px-3 py-1">
+              <Sparkles className="h-3.5 w-3.5" />
+              Built for the Somnia Agentathon
+            </Badge>
+
+            <h1 className="text-balance text-4xl font-semibold leading-[1.05] tracking-tight text-foreground sm:text-5xl lg:text-6xl">
+              Streams that{" "}
+              <span className="bg-gradient-to-br from-primary to-success bg-clip-text text-transparent">
+                pause themselves
+              </span>
+              .
+            </h1>
+
+            <p className="mx-auto mt-6 max-w-2xl text-pretty text-base leading-relaxed text-muted-foreground sm:text-lg">
+              Token streaming controlled by on-chain AI. When a contributor stops shipping,
+              an agent reaches consensus and pauses payment — no multisig, no governance vote,
+              no human in the loop.
+            </p>
+
+            <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
+              <Button asChild size="lg">
+                <Link href="/streams/new">Create a stream</Link>
+              </Button>
+              <Button asChild variant="outline" size="lg">
+                <Link href="/dashboard">View streams</Link>
+              </Button>
+            </div>
+
+            <p className="mt-6 text-xs text-muted-foreground">
+              Somnia testnet · Chain ID 50312 · Source-verified on Shannon
+            </p>
+          </div>
+        </div>
+
+        {/* Soft radial glow under the hero — subtle */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[400px] opacity-50"
+          style={{
+            background:
+              "radial-gradient(50% 60% at 50% 0%, hsl(var(--primary) / 0.18) 0%, transparent 100%)",
+          }}
+        />
       </section>
 
-      {/* Quick links / status bar */}
-      <section className="mb-12 grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatusCard label="Network" value="Somnia Testnet" />
-        <StatusCard label="Active streams" value="—" />
-        <StatusCard label="Total streamed" value="— STT" />
-        <StatusCard label="Agent checks today" value="—" />
-      </section>
-
-      {/* Create stream form (placeholder) */}
-      <section className="mb-12">
-        <h2 className="text-2xl font-semibold mb-4">Create a stream</h2>
-        <div className="bg-drip-surface border border-drip-border rounded-lg p-6">
-          <p className="text-drip-muted italic">
-            TODO: stream creation form. Recipient, total amount, duration,
-            GitHub repo to monitor, check interval. Wire to Drip.createStream
-            and DripPolicies.registerPolicy.
-          </p>
+      {/* Verified-determinism strip */}
+      <section className="container">
+        <div className="rounded-3xl border border-border bg-card p-6 shadow-sm sm:p-8">
+          <div className="flex flex-col items-start gap-6 lg:flex-row lg:items-center lg:justify-between">
+            <div className="max-w-xl">
+              <Badge variant="success" className="mb-3">
+                Verified on testnet · {VERIFIED_RUN.date}
+              </Badge>
+              <h2 className="text-balance text-xl font-semibold leading-tight tracking-tight sm:text-2xl">
+                The autonomous loop ran end-to-end in {VERIFIED_RUN.e2eDurationSec} seconds.
+              </h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Three validators independently classified the same input and reached
+                deterministic consensus on the verdict — same word, same {VERIFIED_RUN.promptTokens} prompt tokens.
+                Auditable end to end.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <Stat label="Validators" value={VERIFIED_RUN.validatorConsensus} />
+              <Stat label="Prompt tokens" value={String(VERIFIED_RUN.promptTokens)} />
+              <Stat label="Cycle" value={`${VERIFIED_RUN.e2eDurationSec}s`} />
+              <Button asChild variant="outline" size="sm" className="gap-1.5">
+                <a href={VERIFIED_RUN.classifierUrl} target="_blank" rel="noopener noreferrer">
+                  Receipt #{VERIFIED_RUN.classifierRequestId}
+                  <ArrowUpRight className="h-3.5 w-3.5" />
+                </a>
+              </Button>
+            </div>
+          </div>
         </div>
       </section>
 
-      {/* Streams list (placeholder) */}
-      <section className="mb-12">
-        <h2 className="text-2xl font-semibold mb-4">Your streams</h2>
-        <div className="bg-drip-surface border border-drip-border rounded-lg p-6">
-          <p className="text-drip-muted italic">
-            TODO: list of active streams. Per stream: live balance ticker,
-            withdrawal button (if recipient), pause/cancel (if sender), and
-            current status badge.
-          </p>
-        </div>
-      </section>
-
-      {/* Agent decision feed — THE DEMO MAGIC MOMENT */}
-      <section className="mb-12">
-        <h2 className="text-2xl font-semibold mb-4">Agent decision feed</h2>
-        <div className="bg-drip-surface border border-drip-border rounded-lg p-6">
-          <p className="text-drip-muted italic">
-            TODO (highest priority): live feed of agent activity. Subscribe to
-            PolicyCheckStarted, GithubDataFetched, ClassificationReceived, and
-            PolicyActionTaken events. Render as a chat-like log with
-            timestamps. This is the visible proof of autonomy — make it look
-            good.
-          </p>
-        </div>
-      </section>
-
-      {/* Footer */}
-      <footer className="mt-24 pt-8 border-t border-drip-border text-sm text-drip-muted">
-        <p>
-          Drip is an open-source agentic streaming protocol. Built on Somnia&apos;s
-          Agentic L1. Source on GitHub.
+      <div className="container py-16">
+        <p className="text-center text-sm text-muted-foreground">
+          Three-pillar grid, dark agent-decision moment, and CTA section ship in Phase 3.
+          This is Phase 1 — design system wired, header / footer / wallet connect live.
         </p>
-      </footer>
-    </main>
+      </div>
+    </>
   );
 }
 
-function StatusCard({ label, value }: { label: string; value: string }) {
+function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-drip-surface border border-drip-border rounded-lg p-4">
-      <p className="text-drip-muted text-xs uppercase tracking-wider mb-2">
+    <div className="rounded-2xl border border-border bg-background/70 px-3.5 py-2">
+      <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
         {label}
       </p>
-      <p className="text-xl font-semibold">{value}</p>
+      <p className="font-numeric text-sm font-semibold">{value}</p>
     </div>
   );
 }
