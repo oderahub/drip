@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useChainId, usePublicClient } from "wagmi";
-import type { Log, PublicClient } from "viem";
+import { decodeEventLog, type AbiEvent, type Log, type PublicClient } from "viem";
 import { dripAbi } from "@/lib/abi/drip";
 import { dripPoliciesAbi } from "@/lib/abi/drip-policies";
 import { ADDRESSES } from "@/lib/contracts";
@@ -13,18 +13,21 @@ import {
   sortFeed,
   type NormalizedFeedEvent,
 } from "@/lib/event-mapping";
+import { fetchAllLogs, filterByStreamId, type RawLog } from "@/lib/explorer-api";
 
 /**
  * Resilient agent-decision feed for a single stream.
  *
- *   1. Historical backfill on mount via chunked `getLogs` (Somnia caps
- *      `eth_getLogs` at 1000 blocks → we walk in 999-block windows).
- *   2. Live: `watchContractEvent` on Drip and DripPolicies — WebSocket
- *      when the wagmi transport supports it, otherwise viem polls
- *      internally.
+ *   1. Historical backfill on mount via Blockscout's `/api/v2/addresses/
+ *      {addr}/logs` (paginated, no block-range cap). Somnia's JSON-RPC
+ *      caps `eth_getLogs` at 1000 blocks, so for a stream that's
+ *      hours/days old we cannot use RPC for the full history.
+ *   2. Live: viem's `watchContractEvent` on both contracts. Uses the
+ *      configured transport — WebSocket-preferred where available, with
+ *      viem's internal polling fallback otherwise.
  *   3. Safety net: every 5 s we also `getLogs` from the last-seen
  *      block forward. Anything the WebSocket dropped during a brief
- *      disconnect lands here. All three sources push into the same
+ *      disconnect lands here. All three sources push into a single
  *      dedup Map keyed by (blockHash, logIndex).
  *
  * Sort: every render returns the events sorted by (blockNumber,
@@ -33,10 +36,10 @@ import {
  * newest-first display.
  */
 
-const MAX_HISTORICAL_BLOCKS = 10_000n; // ~17 min of history at 100 ms/block — enough for any demo cycle
 const POLL_INTERVAL_MS = 5_000;
-const LOG_CHUNK_SIZE = 999n;            // Somnia's getLogs cap is 1000 blocks
-const TS_REFINE_PARALLELISM = 6;        // simultaneous block-timestamp lookups
+const LOG_CHUNK_SIZE = 999n;            // Somnia getLogs cap is 1000 blocks
+const SAFETY_NET_LOOKBACK = 2_000n;     // How far back the 5 s poll scans
+const TS_REFINE_PARALLELISM = 6;
 
 export interface UseStreamFeedResult {
   events: NormalizedFeedEvent[];        // sorted ascending, compacted
@@ -55,10 +58,8 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
   const [isWatching, setIsWatching] = React.useState(false);
 
   // Refs so the long-lived intervals + watchers don't see stale state.
-  const byKeyRef = React.useRef(byKey);
-  byKeyRef.current = byKey;
   const lastSeenBlockRef = React.useRef<bigint>(0n);
-  const blockTsCacheRef = React.useRef<Map<string, number>>(new Map()); // blockNumber -> unix sec
+  const blockTsCacheRef = React.useRef<Map<string, number>>(new Map());
 
   const targetStreamId = streamId ?? null;
 
@@ -81,22 +82,19 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
 
   /** Refine event.timestamp from chain block timestamps (best effort). */
   const refineTimestamps = React.useCallback(
-    async (publicClient: PublicClient, records: NormalizedFeedEvent[]) => {
+    async (pc: PublicClient, records: NormalizedFeedEvent[]) => {
       const distinctBlocks = Array.from(new Set(records.map((r) => r.blockNumber.toString())));
       const cache = blockTsCacheRef.current;
       const toFetch = distinctBlocks.filter((b) => !cache.has(b));
-      // Bounded-parallel fetch
       for (let i = 0; i < toFetch.length; i += TS_REFINE_PARALLELISM) {
         const slice = toFetch.slice(i, i + TS_REFINE_PARALLELISM);
         const results = await Promise.allSettled(
           slice.map((b) =>
-            publicClient.getBlock({ blockNumber: BigInt(b), includeTransactions: false }),
+            pc.getBlock({ blockNumber: BigInt(b), includeTransactions: false }),
           ),
         );
         results.forEach((res, idx) => {
-          if (res.status === "fulfilled") {
-            cache.set(slice[idx], Number(res.value.timestamp));
-          }
+          if (res.status === "fulfilled") cache.set(slice[idx], Number(res.value.timestamp));
         });
       }
       setByKey((prev) => {
@@ -105,7 +103,6 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
         for (const [k, r] of next) {
           const sec = cache.get(r.blockNumber.toString());
           if (sec && r.event.timestamp.getTime() !== sec * 1000) {
-            // Replace the event's timestamp with the real block time.
             const refinedEvent = { ...r.event, timestamp: new Date(sec * 1000) };
             next.set(k, { ...r, event: refinedEvent as typeof r.event });
             changed = true;
@@ -117,61 +114,85 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
     [],
   );
 
-  /** Chunked `getLogs` walker. */
+  /**
+   * Decode a Blockscout-shape raw log against an ABI, returning a viem-
+   * style decoded log that `mapLogToFeedEvent` understands.
+   */
+  const decodeRaw = React.useCallback(
+    (raw: RawLog, abi: typeof dripAbi | typeof dripPoliciesAbi): Parameters<typeof mapLogToFeedEvent>[0] | null => {
+      try {
+        const dec = decodeEventLog({
+          abi: abi as readonly AbiEvent[],
+          data: raw.data,
+          topics: raw.topics as [signature: `0x${string}`, ...args: `0x${string}`[]],
+        });
+        return {
+          ...raw,
+          eventName: dec.eventName,
+          args: dec.args as Record<string, unknown>,
+          // viem Log shape has these, fill with sane defaults
+          removed: false,
+          transactionIndex: 0,
+        } as unknown as Parameters<typeof mapLogToFeedEvent>[0];
+      } catch {
+        return null;
+      }
+    },
+    [],
+  );
+
+  /** Decode + filter + map a batch of raw Blockscout logs from one contract. */
+  const ingestRawLogs = React.useCallback(
+    (logs: RawLog[], source: "drip" | "policies", streamId: bigint) => {
+      const filtered = filterByStreamId(logs, streamId);
+      const records: NormalizedFeedEvent[] = [];
+      const abi = source === "drip" ? dripAbi : dripPoliciesAbi;
+      for (const raw of filtered) {
+        const decoded = decodeRaw(raw, abi);
+        if (!decoded) continue;
+        const mapped = mapLogToFeedEvent(decoded, source);
+        if (mapped) records.push(mapped);
+      }
+      ingest(records);
+      return records;
+    },
+    [decodeRaw, ingest],
+  );
+
+  /** RPC-chunked `getLogs` walker — used only for the live safety-net poll. */
   const fetchLogsWindow = React.useCallback(
-    async (
-      pc: PublicClient,
-      fromBlock: bigint,
-      toBlock: bigint,
-    ): Promise<NormalizedFeedEvent[]> => {
-      if (!targetStreamId) return [];
-      const out: NormalizedFeedEvent[] = [];
-      // Walk in 999-block chunks; gather logs from both contracts in each window.
+    async (pc: PublicClient, fromBlock: bigint, toBlock: bigint, streamId: bigint) => {
+      const records: NormalizedFeedEvent[] = [];
       let cursor = fromBlock;
       while (cursor <= toBlock) {
         const end = cursor + LOG_CHUNK_SIZE - 1n > toBlock ? toBlock : cursor + LOG_CHUNK_SIZE - 1n;
-
         const [dripLogs, policyLogs] = await Promise.all([
-          pc
-            .getLogs({
-              address: addrs.drip,
-              events: dripAbi.filter((x) => x.type === "event") as unknown as readonly never[],
-              fromBlock: cursor,
-              toBlock: end,
-            })
-            .catch(() => [] as Log[]),
-          pc
-            .getLogs({
-              address: addrs.dripPolicies,
-              events: dripPoliciesAbi.filter((x) => x.type === "event") as unknown as readonly never[],
-              fromBlock: cursor,
-              toBlock: end,
-            })
-            .catch(() => [] as Log[]),
+          pc.getLogs({ address: addrs.drip, fromBlock: cursor, toBlock: end }).catch(() => [] as Log[]),
+          pc.getLogs({ address: addrs.dripPolicies, fromBlock: cursor, toBlock: end }).catch(() => [] as Log[]),
         ]);
-
         for (const raw of dripLogs) {
-          const mapped = mapLogToFeedEvent(raw as Parameters<typeof mapLogToFeedEvent>[0], "drip");
-          if (!mapped) continue;
-          if (!logBelongsToStream(raw, targetStreamId)) continue;
-          out.push(mapped);
+          const decoded = decodeViemLog(raw, dripAbi);
+          if (!decoded) continue;
+          if (!logBelongsToStream(decoded, streamId)) continue;
+          const m = mapLogToFeedEvent(decoded, "drip");
+          if (m) records.push(m);
         }
         for (const raw of policyLogs) {
-          const mapped = mapLogToFeedEvent(raw as Parameters<typeof mapLogToFeedEvent>[0], "policies");
-          if (!mapped) continue;
-          if (!logBelongsToStream(raw, targetStreamId)) continue;
-          out.push(mapped);
+          const decoded = decodeViemLog(raw, dripPoliciesAbi);
+          if (!decoded) continue;
+          if (!logBelongsToStream(decoded, streamId)) continue;
+          const m = mapLogToFeedEvent(decoded, "policies");
+          if (m) records.push(m);
         }
-
         cursor = end + 1n;
       }
-      return out;
+      return records;
     },
-    [addrs.drip, addrs.dripPolicies, targetStreamId],
+    [addrs.drip, addrs.dripPolicies],
   );
 
   /* ──────────────────────────────────────────────────────────────── */
-  /*  Mount: historical backfill                                       */
+  /*  Mount: historical backfill via Blockscout                        */
   /* ──────────────────────────────────────────────────────────────── */
 
   React.useEffect(() => {
@@ -181,17 +202,25 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
     setByKey(new Map());
     blockTsCacheRef.current = new Map();
     lastSeenBlockRef.current = 0n;
+    const sid = targetStreamId;
 
     (async () => {
       try {
-        const head = await publicClient.getBlockNumber();
-        const lower = head > MAX_HISTORICAL_BLOCKS ? head - MAX_HISTORICAL_BLOCKS : 0n;
-        const records = await fetchLogsWindow(publicClient, lower, head);
+        // Run both contract fetches in parallel.
+        const [dripLogs, policyLogs] = await Promise.all([
+          fetchAllLogs({ chainId, address: addrs.drip }),
+          fetchAllLogs({ chainId, address: addrs.dripPolicies }),
+        ]);
         if (cancelled) return;
-        ingest(records);
-        // Best-effort timestamp refinement, runs in the background.
-        void refineTimestamps(publicClient, records);
-        lastSeenBlockRef.current = head;
+        const dripRecords = ingestRawLogs(dripLogs, "drip", sid);
+        const policyRecords = ingestRawLogs(policyLogs, "policies", sid);
+        const all = [...dripRecords, ...policyRecords];
+        // Best-effort timestamp refinement runs in the background.
+        if (all.length > 0) void refineTimestamps(publicClient, all);
+        // Track the highest block we've seen so the safety-net poll
+        // doesn't redundantly walk through history.
+        const head = await publicClient.getBlockNumber();
+        if (!cancelled) lastSeenBlockRef.current = head;
       } finally {
         if (!cancelled) setIsLoadingHistory(false);
       }
@@ -200,7 +229,7 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
     return () => {
       cancelled = true;
     };
-  }, [publicClient, targetStreamId, fetchLogsWindow, ingest, refineTimestamps]);
+  }, [publicClient, targetStreamId, chainId, addrs.drip, addrs.dripPolicies, ingestRawLogs, refineTimestamps]);
 
   /* ──────────────────────────────────────────────────────────────── */
   /*  Live subscriptions                                               */
@@ -208,15 +237,18 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
 
   React.useEffect(() => {
     if (!publicClient || !targetStreamId) return;
+    const sid = targetStreamId;
     setIsWatching(true);
 
     const handleLogs = (logs: Log[], source: "drip" | "policies") => {
+      const abi = source === "drip" ? dripAbi : dripPoliciesAbi;
       const records: NormalizedFeedEvent[] = [];
       for (const raw of logs) {
-        const mapped = mapLogToFeedEvent(raw as Parameters<typeof mapLogToFeedEvent>[0], source);
-        if (!mapped) continue;
-        if (!logBelongsToStream(raw, targetStreamId)) continue;
-        records.push(mapped);
+        const decoded = decodeViemLog(raw, abi);
+        if (!decoded) continue;
+        if (!logBelongsToStream(decoded, sid)) continue;
+        const m = mapLogToFeedEvent(decoded, source);
+        if (m) records.push(m);
       }
       if (records.length > 0) {
         ingest(records);
@@ -245,11 +277,12 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
   }, [publicClient, targetStreamId, addrs.drip, addrs.dripPolicies, ingest, refineTimestamps]);
 
   /* ──────────────────────────────────────────────────────────────── */
-  /*  Safety-net poll — every 5 s, getLogs from lastSeenBlock forward  */
+  /*  Safety-net poll — every 5 s, getLogs over the most recent window */
   /* ──────────────────────────────────────────────────────────────── */
 
   React.useEffect(() => {
     if (!publicClient || !targetStreamId) return;
+    const sid = targetStreamId;
     let cancelled = false;
 
     const tick = async () => {
@@ -257,15 +290,15 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
       try {
         const head = await publicClient.getBlockNumber();
         const last = lastSeenBlockRef.current;
-        if (head <= last) return;
-        const records = await fetchLogsWindow(publicClient, last + 1n, head);
+        const fromBlock = last > 0n ? last + 1n : (head > SAFETY_NET_LOOKBACK ? head - SAFETY_NET_LOOKBACK : 0n);
+        if (head < fromBlock) return;
+        const records = await fetchLogsWindow(publicClient, fromBlock, head, sid);
         if (cancelled) return;
         ingest(records);
-        void refineTimestamps(publicClient, records);
+        if (records.length > 0) void refineTimestamps(publicClient, records);
         lastSeenBlockRef.current = head;
       } catch {
-        // Swallow — the next tick will retry. The watcher might still
-        // be delivering; we only fail-open.
+        // Swallow — next tick retries. The watcher may still be delivering.
       }
     };
 
@@ -284,32 +317,55 @@ export function useStreamFeed(streamId: bigint | null | undefined): UseStreamFee
     isWatching,
     refetch: () => {
       if (!publicClient || !targetStreamId) return;
-      // Force a full refresh.
       lastSeenBlockRef.current = 0n;
       setByKey(new Map());
       setIsLoadingHistory(true);
+      const sid = targetStreamId;
       void (async () => {
-        const head = await publicClient.getBlockNumber();
-        const lower = head > MAX_HISTORICAL_BLOCKS ? head - MAX_HISTORICAL_BLOCKS : 0n;
-        const records = await fetchLogsWindow(publicClient, lower, head);
-        ingest(records);
-        void refineTimestamps(publicClient, records);
-        setIsLoadingHistory(false);
+        try {
+          const [dripLogs, policyLogs] = await Promise.all([
+            fetchAllLogs({ chainId, address: addrs.drip }),
+            fetchAllLogs({ chainId, address: addrs.dripPolicies }),
+          ]);
+          const all = [
+            ...ingestRawLogs(dripLogs, "drip", sid),
+            ...ingestRawLogs(policyLogs, "policies", sid),
+          ];
+          if (all.length > 0) void refineTimestamps(publicClient, all);
+          const head = await publicClient.getBlockNumber();
+          lastSeenBlockRef.current = head;
+        } finally {
+          setIsLoadingHistory(false);
+        }
       })();
     },
   };
 }
 
-/** Does this log's first indexed arg equal `streamId`? */
-function logBelongsToStream(raw: Log, streamId: bigint): boolean {
-  // Both contracts emit the stream-id as the first indexed argument.
-  // viem decodes it into args.streamId when ABI is supplied.
-  const decoded = raw as Log & { args?: { streamId?: bigint } };
-  if (decoded.args && typeof decoded.args.streamId === "bigint") {
-    return decoded.args.streamId === streamId;
+/* ------------------------------------------------------------------ */
+/*  Local viem-log decoder + streamId filter                            */
+/* ------------------------------------------------------------------ */
+
+function decodeViemLog(
+  raw: Log,
+  abi: typeof dripAbi | typeof dripPoliciesAbi,
+): Parameters<typeof mapLogToFeedEvent>[0] | null {
+  try {
+    const dec = decodeEventLog({
+      abi: abi as readonly AbiEvent[],
+      data: raw.data,
+      topics: raw.topics as [signature: `0x${string}`, ...args: `0x${string}`[]],
+    });
+    return { ...raw, eventName: dec.eventName, args: dec.args } as unknown as Parameters<typeof mapLogToFeedEvent>[0];
+  } catch {
+    return null;
   }
-  // Fallback: read from topics[1] directly.
-  const topic1 = raw.topics?.[1];
+}
+
+function logBelongsToStream(decoded: { args?: Record<string, unknown>; topics?: readonly (`0x${string}` | null)[] }, streamId: bigint): boolean {
+  const sid = decoded.args?.streamId;
+  if (typeof sid === "bigint") return sid === streamId;
+  const topic1 = decoded.topics?.[1];
   if (!topic1) return false;
   try {
     return BigInt(topic1) === streamId;
