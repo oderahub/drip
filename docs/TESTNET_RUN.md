@@ -122,6 +122,17 @@ This contradicts a literal reading of `skill-reactivity.md` ("topic[1] == timest
 
 The skill file (`skill-reactivity.md`) has been updated to document this empirically. Re-deployed contracts (the addresses at the top of this document) pass the full E2E test on the first run.
 
+## Subsequent activity on stream 1 (post-cycle exploratory testing)
+
+The original 70-second autonomous cycle documented above remains the verified-determinism evidence for this milestone. Between May 26 and May 29, 2026, stream 1's policy continued to self-perpetuate at its 60-second interval — by design, because that's exactly the agentic-loop behaviour Drip exists to demonstrate. The cycles were left running while frontend Milestone 5 was developed against live testnet state.
+
+**Stream 1's policy was disabled on May 29, 2026** ([tx `0xf156…d2952a`](https://shannon-explorer.somnia.network/tx/0xf156eaf0bd5dfafd53dff2ff931f4b441c76382eebea720d2ddf49e9f523952a)) so the demo run for Milestone 6 starts on a clean ledger:
+- Stream itself remains in `Paused` status (it had been paused by the first cycle and never resumed; recipient never withdrew).
+- 11 additional `PolicyCheckScheduled → PolicyCheckStarted → GithubDataFetched → ClassificationReceived → PolicyActionTaken` cycles ran across those 3 days, eight of which reached `"dormant"` classifications and three of which aborted at the JSON-API leg (the aggregator's GitHub fetch occasionally times out under cold-start conditions; the chain auto-schedules the next check on abort, which is the resilience behaviour the spec calls for).
+- The Milestone 6 demo run will use a **fresh stream created during the recording**, not stream 1. Stream 1 stays on chain as the canonical M4 evidence; its full event history is browsable at [`/streams/1`](https://drip-frontend-psi.vercel.app/streams/1) and renders all 79 events via the resilient feed implemented in M5 Phase 5.
+
+DripPolicies was topped up to 5 STT on the same day (after the policy disable, balance was 0.04 STT) so M6's demo cycles have ample headroom — [tx `0xe656…41f727381`](https://shannon-explorer.somnia.network/tx/0xe6565713db89b04eeb00514a14c44bb04436ce03d1f5927349969f341f727381). At 0.36 STT per cycle that's ~13 cycles of buffer.
+
 ## Repository pointers
 
 - Raw run summary JSON: [`contracts/test-results/testnet-e2e-2026-05-26T02-47-16-960Z.json`](../contracts/test-results/testnet-e2e-2026-05-26T02-47-16-960Z.json)
