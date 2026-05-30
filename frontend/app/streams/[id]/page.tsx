@@ -46,7 +46,7 @@ export default function StreamDetailPage() {
     return tupleToStream(streamId, streamQuery.data as unknown as StreamTuple);
   }, [streamQuery.data, streamId]);
 
-  const feed = useStreamFeed(streamId);
+  const feed = useStreamFeed(streamId, stream?.startTime ?? null);
 
   // ── Invalid stream ID ────────────────────────────────────────────
   if (streamId === null) {
@@ -80,6 +80,7 @@ export default function StreamDetailPage() {
           events={feed.events}
           isLoadingHistory={feed.isLoadingHistory}
           isWatching={feed.isWatching}
+          backfillProgress={feed.backfillProgress}
           onRefresh={feed.refetch}
         />
       </div>

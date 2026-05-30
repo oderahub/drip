@@ -10,11 +10,13 @@ export function StreamFeed({
   events,
   isLoadingHistory,
   isWatching,
+  backfillProgress,
   onRefresh,
 }: {
   events: NormalizedFeedEvent[];
   isLoadingHistory: boolean;
   isWatching: boolean;
+  backfillProgress: { done: number; total: number } | null;
   onRefresh: () => void;
 }) {
   // Render newest-first for the feed display. The hook returns
@@ -31,6 +33,14 @@ export function StreamFeed({
             <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success">
               <Radio className="h-3 w-3" />
               live
+            </span>
+          )}
+          {backfillProgress && backfillProgress.total > 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              <span aria-hidden className="font-mono tabular-nums">
+                {backfillProgress.done}/{backfillProgress.total}
+              </span>
+              scanning history
             </span>
           )}
         </div>
